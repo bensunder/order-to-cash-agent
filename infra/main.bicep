@@ -178,7 +178,7 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = {
 }
 
 // ---------- AKS (orchestrator runtime at scale) ----------
-resource aks 'Microsoft.ContainerService/managedClusters@2024-03-02-preview' = {
+resource aks 'Microsoft.ContainerService/managedClusters@2024-09-01' = {
   name: 'aks-o2c-${nameSuffix}'
   location: location
   tags: tags
