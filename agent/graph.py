@@ -74,8 +74,11 @@ llm = AzureChatOpenAI(
     api_key=FOUNDRY_API_KEY,
     azure_deployment=MODEL_DEPLOYMENT,
     api_version="2024-10-21",
-    # gpt-5-mini only supports the default temperature (1) — this model
-    # family rejects any explicit temperature override, including 0.
+    # gpt-5-mini only supports the default temperature (1). Must be passed
+    # explicitly — langchain_openai's own default is 0.7, not the model's
+    # default, so simply omitting the parameter still sends an unsupported
+    # value.
+    temperature=1,
 )
 
 search_client = SearchClient(
