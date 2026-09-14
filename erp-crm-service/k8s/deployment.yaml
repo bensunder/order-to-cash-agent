@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: erp-crm-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: erp-crm-service }
+  template:
+    metadata:
+      labels: { app: erp-crm-service }
+    spec:
+      containers:
+        - name: erp-crm-service
+          image: <ACR_LOGIN_SERVER>/erp-crm-service:latest
+          ports: [{ containerPort: 8080 }]
+          envFrom:
+            - secretRef: { name: erp-crm-secrets }
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: erp-crm-secrets
+type: Opaque
+stringData:
+  COSMOS_ENDPOINT: "REPLACE_ME"
+  COSMOS_KEY: "REPLACE_ME"
+  SERVICEBUS_CONNECTION: "REPLACE_ME"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: erp-crm-service-svc
+spec:
+  selector: { app: erp-crm-service }
+  ports: [{ port: 80, targetPort: 8080 }]
+  type: LoadBalancer

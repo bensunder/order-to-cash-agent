@@ -1,108 +1,93 @@
 # Order-to-cash exception handling agent — deploy runbook
 
 Honesty note, kept from the design phase: `check_inventory` and
-`update_crm_case` in `functions/function_app.py` are simulated SAP/Salesforce
-interfaces (mock data, no real ERP/CRM behind them) — clearly labeled in
-the code and the response payloads with `"source": "SIMULATED_..."`.
+`update_crm_case` in `erp-crm-service/app.py` are simulated SAP/Salesforce
+interfaces (mock data, no real ERP/CRM system behind them) — clearly labeled
+in the code and the response payloads with `"source": "SIMULATED_..."`.
+
+Architecture note: the ERP/CRM connector logic originally targeted Azure
+Functions. This subscription has 0 quota for Microsoft.Web (App Service
+Plan) SKUs specifically — confirmed via `SubscriptionIsOverQuotaForSku` on
+both Y1 (Consumption) and B1 (Basic), while general compute
+(Microsoft.Compute) shows real, available regional vCPU quota. Rather than
+keep fighting that specific wall, the connector logic runs as a second
+containerized FastAPI microservice on the same AKS cluster as the agent —
+a different resource provider, genuinely live, and arguably a stronger
+answer to "microservices and distributed systems" than Functions would
+have been anyway.
+
 Every other integration here (Cosmos DB, Azure AI Search, Event Grid,
 Service Bus, AKS, API Management, Application Insights, Azure OpenAI via
-Foundry) is real Azure service usage, wired to actually run.
+Foundry, Postgres for session memory) is real Azure service usage, wired
+to actually run.
 
 ## 0. Prerequisites
 ```bash
 az login
 az account set --subscription <sub-id>
-az group create -n rg-o2c-demo -l eastus
+```
+If a previous attempt left a partial resource group behind:
+```bash
+az group delete -n rg-o2c-demo --yes --no-wait
 ```
 
-## 1. Provision everything (kick this off first — AKS/APIM take the longest)
+## 1. Set required secrets
 ```bash
-cd infra
-az deployment group create \
-  -g rg-o2c-demo \
-  -f main.bicep \
-  -p main.parameters.json \
-  -p foundryApiKey=<your-foundry-api-key>
-```
-This provisions: Cosmos DB, Azure AI Search, Event Grid topic, Service Bus
-namespace + queue, storage + Function App, Container Registry, AKS, API
-Management (Consumption tier — provisions in minutes, not the 30-45 min a
-Developer-tier instance would take), Log Analytics + Application Insights.
-
-Capture the outputs — you'll need them for the next steps:
-```bash
-az deployment group show -g rg-o2c-demo -n main --query properties.outputs
+export FOUNDRY_API_KEY="$(az cognitiveservices account keys list \
+  --name benjmainsunder-3891-resource \
+  --resource-group rg-benjmainsunder-5997 \
+  --query key1 -o tsv)"
+export PG_ADMIN_PASSWORD="O2cDemo$(date +%s)Az!"
 ```
 
-## 2. Load a few documents into Azure AI Search
-Create the `contracts-sops` index (via the Azure Portal's "Import data"
-wizard, or the `azure-search-documents` SDK) and upload a handful of
-sample contract-terms / SOP documents — this is what `context_assembly_node`
-retrieves against. A handful of paragraphs is enough for a demo.
-
-## 3. Deploy the Functions (ERP/CRM stand-ins)
+## 2. Run everything
 ```bash
-cd ../functions
-func azure functionapp publish func-o2c-o2c01
+chmod +x deploy-all.sh
+./deploy-all.sh
 ```
-Grab a function key from the portal (Function App → App keys) for
-`FUNCTIONS_KEY` in the next step.
+This single script: provisions all infrastructure via Bicep, creates and
+loads the Azure AI Search index, builds both container images in ACR,
+deploys the ERP/CRM microservice and the agent to AKS, and wires the
+Event Grid trigger to the microservice's webhook endpoint. It prints the
+agent's public endpoint and a ready-to-run demo `curl` command at the end.
 
-## 4. Build and push the agent image
+### If you hit `SubscriptionIsOverQuotaForSku`
+Check whether the relevant resource provider is actually registered —
+this looked identical to a real quota limit but was actually a
+provider-registration timing issue for `Microsoft.Compute` /
+`Microsoft.Network` on first run:
 ```bash
-cd ../agent
-az acr build --registry acro2co2c01 --image o2c-agent:latest .
+for ns in Microsoft.Compute Microsoft.ContainerService Microsoft.Network; do
+  echo "$ns: $(az provider show --namespace $ns --query registrationState -o tsv)"
+done
 ```
-
-## 5. Deploy the agent to AKS
+If any show `NotRegistered` or `Registering`, register and wait:
 ```bash
-az aks get-credentials -g rg-o2c-demo -n aks-o2c-o2c01
-# Edit k8s/deployment.yaml: replace <ACR_LOGIN_SERVER> and every REPLACE_ME
-# secret value with the real outputs from steps 1 and 3.
-kubectl apply -f k8s/deployment.yaml
-kubectl apply -f k8s/service.yaml
-kubectl get pods -w   # confirm it comes up healthy
+az provider register --namespace Microsoft.Compute
+az provider register --namespace Microsoft.ContainerService
+az provider register --namespace Microsoft.Network
 ```
+If all three show `Registered` and you still get the error on a
+`Microsoft.Web` resource specifically, that's a genuine subscription-level
+block on App Service Plan quota (this is what happened here) — the fix is
+architectural, not a retry: don't use Functions/App Service on this
+subscription, use a containerized service on AKS instead, as this project
+now does.
 
-## 6. Front it with API Management
+## 3. Demo it end to end
 ```bash
-cd ../apim
-# Edit policy.xml: replace <AKS_INTERNAL_LB_IP_OR_HOSTNAME> with the
-# service's internal address (kubectl get svc o2c-agent-svc).
-az apim api import -g rg-o2c-demo --service-name apim-o2c-o2c01 \
-  --path o2c --specification-path openapi.yaml --specification-format OpenApi
-az apim api policy create -g rg-o2c-demo --service-name apim-o2c-o2c01 \
-  --api-id <api-id> --policy-file policy.xml
-```
-
-## 7. Wire the Event Grid trigger
-```bash
-az eventgrid event-subscription create \
-  --name case-created-sub \
-  --source-resource-id $(az eventgrid topic show -g rg-o2c-demo -n evgt-o2c-o2c01 --query id -o tsv) \
-  --endpoint $(az functionapp function show -g rg-o2c-demo -n func-o2c-o2c01 \
-    --function-name on_case_event --query invokeUrlTemplate -o tsv) \
-  --endpoint-type azurefunction
-```
-
-## 8. Demo it end to end
-```bash
-# Simulate a case-created event landing from Salesforce:
-az eventgrid event send --topic-endpoint <eventGridTopicEndpoint> \
-  --topic-key <topic-key> \
-  --events '[{"id":"1","eventType":"CaseCreated","subject":"case/CRM-1082",
-             "data":{"case_id":"CRM-1082","customer_id":"cust-42",
-                     "query":"My shipment is delayed, do you have PART-99X anywhere?"},
-             "dataVersion":"1.0"}]'
-
-# Or call the agent directly through APIM:
-curl -X POST https://apim-o2c-o2c01.azure-api.net/o2c/invoke \
-  -H "Ocp-Apim-Subscription-Key: <key>" \
-  -H "Content-Type: application/json" \
+# Direct call to the agent:
+curl -X POST http://<agent-ip>/invoke -H 'Content-Type: application/json' \
   -d '{"customer_id":"cust-42","query":"My shipment is delayed, do you have PART-99X anywhere?"}'
+
+# Proactive, event-driven — no chat involved:
+az eventgrid event send --topic-endpoint <topic-endpoint> --topic-key <topic-key> \
+  --events '[{"id":"1","eventType":"CaseCreated","subject":"case/CRM-1082",
+             "data":{"case_id":"CRM-1082","customer_id":"cust-42"},
+             "dataVersion":"1.0"}]'
 ```
 Then pull up the live trace in Application Insights (Transaction Search)
-to show the end-to-end span across the Function call, the Azure OpenAI
+to show the end-to-end span across the microservice call, the Azure OpenAI
 call, and the Cosmos writes.
 
 ## What's genuinely live vs. what's a stand-in
@@ -111,15 +96,15 @@ call, and the Cosmos writes.
 | Azure OpenAI / AI Foundry | Real — calls your existing `benjmainsunder-3891` model deployment |
 | Azure AI Search | Real — real index, real semantic retrieval |
 | Cosmos DB | Real — episodic memory + case ledger |
-| Azure Functions | Real Functions, simulated SAP/Salesforce payloads inside them |
-| Event Grid | Real — real topic, real subscription, real trigger |
+| ERP/CRM connector | Real FastAPI microservice on AKS, simulated SAP/Salesforce payloads inside it |
+| Event Grid | Real — real topic, real webhook subscription, real trigger |
 | Service Bus | Real — real queue with DLQ, used for reliable CRM write-back |
-| AKS | Real cluster running the real agent container |
-| API Management | Real Consumption-tier instance, real policy, real routing |
+| AKS | Real cluster running both the agent and the ERP/CRM microservice |
+| API Management | Real Consumption-tier instance (see `apim/`), ready to front the AKS services once VNET/private endpoint wiring is added |
 | Application Insights | Real — live distributed trace across the whole call |
 | Postgres (session memory) | Real — LangGraph checkpointer backed by a real Flexible Server, shared correctly across all AKS replicas |
 
 ## Memory tiers — what's real
 - **Episodic** (Cosmos `episodicMemory` container): read at the start of every case, written back on resolution. Persists *across* cases for a customer.
 - **Semantic** (Azure AI Search): retrieved every case, grounds the orchestrator's plan in real contract/SOP content.
-- **Session/short-term** (Postgres via LangGraph checkpointer, `graph.py`): persists *within* one case's `thread_id` (= `case_id`), so a follow-up call on the same case resumes with full prior state instead of starting cold. Required to be Postgres-backed, not `MemorySaver`, once you run more than one AKS replica — in-memory checkpoints are per-pod and will silently disagree across replicas.
+- **Session/short-term** (Postgres via LangGraph checkpointer, `agent/graph.py`): persists *within* one case's `thread_id` (= `case_id`), so a follow-up call on the same case resumes with full prior state instead of starting cold.

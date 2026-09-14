@@ -25,7 +25,6 @@ echo "== 3. Capture outputs =="
 o() { az deployment group show -g "$RG" -n main --query "properties.outputs.$1.value" -o tsv; }
 COSMOS_ENDPOINT=$(o cosmosEndpoint)
 SEARCH_ENDPOINT=$(o searchEndpoint)
-FUNC_APP=$(o functionAppName)
 ACR_LOGIN_SERVER=$(o acrLoginServer)
 AKS_NAME=$(o aksName)
 APPINSIGHTS_CONN=$(o appInsightsConnectionString)
@@ -33,6 +32,9 @@ POSTGRES_CONN=$(o postgresConnectionString)
 
 COSMOS_KEY=$(az cosmosdb keys list -g "$RG" -n "cosmos-o2c-$SUFFIX" --query primaryMasterKey -o tsv)
 SEARCH_KEY=$(az search admin-key show -g "$RG" --service-name "srch-o2c-$SUFFIX" --query primaryKey -o tsv)
+SERVICEBUS_CONNECTION=$(az servicebus namespace authorization-rule keys list \
+  -g "$RG" --namespace-name "sb-o2c-$SUFFIX" --name RootManageSharedAccessKey \
+  --query primaryConnectionString -o tsv)
 
 echo "== 4. Create AI Search index + load sample contract/SOP docs =="
 curl -s -X PUT "$SEARCH_ENDPOINT/indexes/contracts-sops?api-version=2024-07-01" \
@@ -51,22 +53,71 @@ curl -s -X POST "$SEARCH_ENDPOINT/indexes/contracts-sops/docs/index?api-version=
     {"@search.action":"upload","id":"3","content":"Cross-ship authorization: agents may authorize a cross-ship without manager approval if the replacement part is available in any warehouse with at least 1 unit of stock."}
   ]}' -o /dev/null
 
-echo "== 5. Deploy Functions (zip deploy, no func CLI needed) =="
-(cd functions && zip -qr ../functions.zip . -x "*.pyc")
-az functionapp deployment source config-zip -g "$RG" -n "$FUNC_APP" --src functions.zip -o none
-echo "Waiting for functions to register..."
-sleep 20
-FUNC_KEY=$(az functionapp function keys list -g "$RG" -n "$FUNC_APP" --function-name check_inventory --query default -o tsv)
-
-echo "== 6. Build agent image in ACR (no local Docker needed) =="
+echo "== 5. Build both container images in ACR (no local Docker needed) =="
 ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
 az acr build --registry "$ACR_NAME" --image o2c-agent:latest ./agent
+az acr build --registry "$ACR_NAME" --image erp-crm-service:latest ./erp-crm-service
 
-echo "== 7. AKS credentials =="
+echo "== 6. AKS credentials =="
 az aks install-cli 2>/dev/null || true
 az aks get-credentials -g "$RG" -n "$AKS_NAME" --overwrite-existing
 
-echo "== 8. Generate and apply k8s manifests with real values =="
+echo "== 7. Deploy ERP/CRM microservice to AKS first (agent depends on its URL) =="
+cat > /tmp/erp-crm-deployment.yaml << YAML_EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: erp-crm-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: erp-crm-service }
+  template:
+    metadata:
+      labels: { app: erp-crm-service }
+    spec:
+      containers:
+        - name: erp-crm-service
+          image: ${ACR_LOGIN_SERVER}/erp-crm-service:latest
+          ports: [{ containerPort: 8080 }]
+          envFrom: [{ secretRef: { name: erp-crm-secrets } }]
+          readinessProbe:
+            httpGet: { path: /healthz, port: 8080 }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: erp-crm-secrets
+type: Opaque
+stringData:
+  COSMOS_ENDPOINT: "${COSMOS_ENDPOINT}"
+  COSMOS_KEY: "${COSMOS_KEY}"
+  SERVICEBUS_CONNECTION: "${SERVICEBUS_CONNECTION}"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: erp-crm-service-svc
+spec:
+  selector: { app: erp-crm-service }
+  ports: [{ port: 80, targetPort: 8080 }]
+  type: LoadBalancer
+YAML_EOF
+kubectl apply -f /tmp/erp-crm-deployment.yaml
+
+echo "Waiting for erp-crm-service public IP..."
+for i in $(seq 1 30); do
+  ERP_LB_IP=$(kubectl get svc erp-crm-service-svc -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+  [ -n "$ERP_LB_IP" ] && break
+  sleep 10
+done
+echo "ERP/CRM service reachable at: http://$ERP_LB_IP"
+FUNCTIONS_BASE_URL="http://${ERP_LB_IP}"
+FUNCTIONS_KEY=""   # no key needed on this demo endpoint — add auth before real use
+
+echo "== 8. Deploy the agent, pointing at the erp-crm-service =="
 cat > /tmp/o2c-deployment.yaml << YAML_EOF
 apiVersion: apps/v1
 kind: Deployment
@@ -104,8 +155,8 @@ stringData:
   SEARCH_INDEX_NAME: "contracts-sops"
   COSMOS_ENDPOINT: "${COSMOS_ENDPOINT}"
   COSMOS_KEY: "${COSMOS_KEY}"
-  FUNCTIONS_BASE_URL: "https://${FUNC_APP}.azurewebsites.net"
-  FUNCTIONS_KEY: "${FUNC_KEY}"
+  FUNCTIONS_BASE_URL: "${FUNCTIONS_BASE_URL}"
+  FUNCTIONS_KEY: "${FUNCTIONS_KEY}"
   APPLICATIONINSIGHTS_CONNECTION_STRING: "${APPINSIGHTS_CONN}"
   POSTGRES_CONN_STRING: "${POSTGRES_CONN}"
 YAML_EOF
@@ -136,7 +187,7 @@ YAML_EOF
 kubectl apply -f /tmp/o2c-deployment.yaml
 kubectl apply -f /tmp/o2c-service.yaml
 
-echo "== 9. Wait for the agent's public IP (demo simplicity — VNET-private in production) =="
+echo "Waiting for agent public IP..."
 for i in $(seq 1 30); do
   LB_IP=$(kubectl get svc o2c-agent-svc -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
   [ -n "$LB_IP" ] && break
@@ -144,20 +195,24 @@ for i in $(seq 1 30); do
 done
 echo "Agent reachable at: http://$LB_IP"
 
-echo "== 10. Wire Event Grid trigger =="
+echo "== 9. Wire Event Grid trigger to the erp-crm-service webhook endpoint =="
 TOPIC_ID=$(az eventgrid topic show -g "$RG" -n "evgt-o2c-$SUFFIX" --query id -o tsv)
-FUNC_URL=$(az functionapp function show -g "$RG" -n "$FUNC_APP" --function-name on_case_event --query invokeUrlTemplate -o tsv 2>/dev/null || echo "")
-if [ -n "$FUNC_URL" ]; then
-  az eventgrid event-subscription create --name case-created-sub \
-    --source-resource-id "$TOPIC_ID" --endpoint "$FUNC_URL" --endpoint-type azurefunction -o none
-fi
+az eventgrid event-subscription create --name case-created-sub \
+  --source-resource-id "$TOPIC_ID" \
+  --endpoint "http://${ERP_LB_IP}/api/events" --endpoint-type webhook -o none
 
 echo ""
 echo "===================================================================="
-echo "DONE. Agent is live at: http://$LB_IP:80/invoke"
-echo "Health check: curl http://$LB_IP/healthz"
+echo "DONE."
+echo "Agent:         http://$LB_IP/invoke"
+echo "ERP/CRM svc:   http://$ERP_LB_IP/healthz"
 echo ""
 echo "Demo call:"
 echo "curl -X POST http://$LB_IP/invoke -H 'Content-Type: application/json' \\"
 echo "  -d '{\"customer_id\":\"cust-42\",\"query\":\"My shipment is delayed, do you have PART-99X anywhere?\"}'"
+echo ""
+echo "Simulate a proactive event (no chat involved):"
+echo "az eventgrid event send --topic-endpoint \$(az eventgrid topic show -g $RG -n evgt-o2c-$SUFFIX --query endpoint -o tsv) \\"
+echo "  --topic-key \$(az eventgrid topic key list -g $RG -n evgt-o2c-$SUFFIX --query key1 -o tsv) \\"
+echo "  --events '[{\"id\":\"1\",\"eventType\":\"CaseCreated\",\"subject\":\"case/CRM-1082\",\"data\":{\"case_id\":\"CRM-1082\",\"customer_id\":\"cust-42\"},\"dataVersion\":\"1.0\"}]'"
 echo "===================================================================="

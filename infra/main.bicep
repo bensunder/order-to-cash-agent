@@ -160,54 +160,13 @@ resource sbQueue 'Microsoft.ServiceBus/namespaces/queues@2022-10-01-preview' = {
   }
 }
 
-// ---------- Storage + Functions (ERP/CRM connector stand-ins) ----------
-resource storage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
-  name: 'sto2c${nameSuffix}'
-  location: location
-  tags: tags
-  sku: { name: 'Standard_LRS' }
-  kind: 'StorageV2'
-}
-
-resource funcPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
-  name: 'plan-o2c-${nameSuffix}'
-  location: location
-  tags: tags
-  // Y1 (Consumption) draws from a separate quota that many trial/sandbox
-  // subscriptions have at 0. B1 (Basic) uses standard App Service quota,
-  // which is almost always available. Costs a small hourly rate instead
-  // of being pay-per-execution — fine for a demo, revisit for real scale.
-  sku: { name: 'B1', tier: 'Basic' }
-  kind: 'linux'
-  properties: {
-    reserved: true
-  }
-}
-
-resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
-  name: 'func-o2c-${nameSuffix}'
-  location: location
-  tags: tags
-  kind: 'functionapp,linux'
-  properties: {
-    serverFarmId: funcPlan.id
-    siteConfig: {
-      linuxFxVersion: 'Python|3.12'
-      alwaysOn: true
-      appSettings: [
-        { name: 'AzureWebJobsStorage', value: 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${storage.listKeys().keys[0].value};EndpointSuffix=core.windows.net' }
-        { name: 'FUNCTIONS_WORKER_RUNTIME', value: 'python' }
-        { name: 'FUNCTIONS_EXTENSION_VERSION', value: '~4' }
-        { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
-        { name: 'COSMOS_ENDPOINT', value: cosmos.properties.documentEndpoint }
-        { name: 'COSMOS_KEY', value: cosmos.listKeys().primaryMasterKey }
-        { name: 'EVENTGRID_TOPIC_ENDPOINT', value: eventGridTopic.properties.endpoint }
-        { name: 'SERVICEBUS_CONNECTION', value: listKeys('${serviceBus.id}/AuthorizationRules/RootManageSharedAccessKey', '2022-10-01-preview').primaryConnectionString }
-      ]
-    }
-    httpsOnly: true
-  }
-}
+// ---------- ERP/CRM connector service now runs on AKS instead of App
+// Service/Functions — this subscription has 0 quota for Microsoft.Web
+// (App Service Plan) SKUs specifically, confirmed via
+// SubscriptionIsOverQuotaForSku on both Y1 and B1, while general compute
+// (Microsoft.Compute) has 10 real regional vCPUs available. See
+// erp-crm-service/ for the containerized replacement, deployed to the
+// same AKS cluster below. ----------
 
 // ---------- Container Registry (agent image for AKS) ----------
 resource acr 'Microsoft.ContainerRegistry/registries@2023-11-01-preview' = {
@@ -230,7 +189,7 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-03-02-preview' = {
       {
         name: 'systempool'
         count: 2
-        vmSize: 'Standard_D2s_v5'
+        vmSize: 'Standard_D2s_v3'
         mode: 'System'
         osType: 'Linux'
       }
@@ -269,8 +228,6 @@ resource apim 'Microsoft.ApiManagement/service@2023-05-01-preview' = {
 // ---------- Outputs ----------
 output cosmosEndpoint string = cosmos.properties.documentEndpoint
 output searchEndpoint string = 'https://${search.name}.search.windows.net'
-output functionAppName string = functionApp.name
-output functionAppHostname string = functionApp.properties.defaultHostName
 output eventGridTopicEndpoint string = eventGridTopic.properties.endpoint
 output serviceBusNamespace string = serviceBus.name
 output acrLoginServer string = acr.properties.loginServer

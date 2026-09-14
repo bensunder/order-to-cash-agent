@@ -1,0 +1,5 @@
+fastapi==0.115.*
+uvicorn[standard]==0.32.*
+azure-cosmos==4.7.*
+azure-servicebus==7.12.*
+pydantic==2.9.*
