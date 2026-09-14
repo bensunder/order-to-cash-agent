@@ -1,0 +1,5 @@
+azure-functions
+azure-cosmos
+azure-servicebus
+azure-eventgrid
+opencensus-ext-azure

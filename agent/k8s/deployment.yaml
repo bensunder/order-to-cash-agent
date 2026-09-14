@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: o2c-agent
+  labels:
+    app: o2c-agent
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: o2c-agent
+  template:
+    metadata:
+      labels:
+        app: o2c-agent
+    spec:
+      containers:
+        - name: o2c-agent
+          image: <ACR_LOGIN_SERVER>/o2c-agent:latest
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: o2c-agent-secrets
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: o2c-agent-secrets
+type: Opaque
+stringData:
+  FOUNDRY_ENDPOINT: "https://benjmainsunder-3891-resource.services.ai.azure.com"
+  FOUNDRY_API_KEY: "REPLACE_ME"
+  MODEL_DEPLOYMENT_NAME: "gpt-5-mini"
+  SEARCH_ENDPOINT: "https://<search-name>.search.windows.net"
+  SEARCH_KEY: "REPLACE_ME"
+  SEARCH_INDEX_NAME: "contracts-sops"
+  COSMOS_ENDPOINT: "https://<cosmos-name>.documents.azure.com:443/"
+  COSMOS_KEY: "REPLACE_ME"
+  FUNCTIONS_BASE_URL: "https://<func-app-name>.azurewebsites.net"
+  FUNCTIONS_KEY: "REPLACE_ME"
+  APPLICATIONINSIGHTS_CONNECTION_STRING: "REPLACE_ME"
+  # Session/short-term memory (LangGraph checkpointer). Required once you
+  # run more than 1 replica — without it each pod's in-memory checkpoints
+  # disagree. Leave unset only for a single-replica local/dev run.
+  POSTGRES_CONN_STRING: "postgresql://<user>:<password>@<host>:5432/<db>?sslmode=require"

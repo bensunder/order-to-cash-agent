@@ -1,0 +1,38 @@
+openapi: 3.0.1
+info:
+  title: Order-to-cash exception handling agent
+  version: "1.0"
+paths:
+  /invoke:
+    post:
+      operationId: invokeAgent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customer_id, query]
+              properties:
+                customer_id: { type: string }
+                query: { type: string }
+                case_id: { type: string }
+      responses:
+        "200":
+          description: Agent resolution outcome
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  case_id: { type: string }
+                  outcome: { type: string }
+                  plan: { type: object }
+                  tool_results: { type: object }
+                  judge_result: { type: object }
+  /healthz:
+    get:
+      operationId: healthCheck
+      responses:
+        "200":
+          description: OK
