@@ -125,7 +125,8 @@ def context_assembly_node(state: AgentState) -> Dict[str, Any]:
         episodic_context = {"note": "no prior episodic record for this customer"}
 
     search_results = search_client.search(
-        search_text=state["query"], top=3, query_type="semantic"
+        search_text=state["query"], top=3, query_type="semantic",
+        semantic_configuration_name="default"
     )
     semantic_context = [doc.get("content", "") for doc in search_results]
 
