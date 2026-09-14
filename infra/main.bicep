@@ -173,7 +173,15 @@ resource funcPlan 'Microsoft.Web/serverfarms@2023-12-01' = {
   name: 'plan-o2c-${nameSuffix}'
   location: location
   tags: tags
-  sku: { name: 'Y1', tier: 'Dynamic' }
+  // Y1 (Consumption) draws from a separate quota that many trial/sandbox
+  // subscriptions have at 0. B1 (Basic) uses standard App Service quota,
+  // which is almost always available. Costs a small hourly rate instead
+  // of being pay-per-execution — fine for a demo, revisit for real scale.
+  sku: { name: 'B1', tier: 'Basic' }
+  kind: 'linux'
+  properties: {
+    reserved: true
+  }
 }
 
 resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
@@ -185,6 +193,7 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
     serverFarmId: funcPlan.id
     siteConfig: {
       linuxFxVersion: 'Python|3.12'
+      alwaysOn: true
       appSettings: [
         { name: 'AzureWebJobsStorage', value: 'DefaultEndpointsProtocol=https;AccountName=${storage.name};AccountKey=${storage.listKeys().keys[0].value};EndpointSuffix=core.windows.net' }
         { name: 'FUNCTIONS_WORKER_RUNTIME', value: 'python' }
