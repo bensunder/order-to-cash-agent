@@ -5,7 +5,6 @@
     "nameSuffix": { "value": "o2c01" },
     "foundryEndpoint": { "value": "https://benjmainsunder-3891-resource.services.ai.azure.com" },
     "foundryApiKey": { "value": "REPLACE_WITH_REAL_KEY_OR_USE_KEYVAULT" },
-    "modelDeploymentName": { "value": "gpt-5-mini" },
-    "postgresAdminPassword": { "value": "REPLACE_WITH_A_REAL_SECRET" }
+    "modelDeploymentName": { "value": "gpt-5-mini" }
   }
 }

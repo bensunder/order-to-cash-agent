@@ -18,7 +18,7 @@ have been anyway.
 
 Every other integration here (Cosmos DB, Azure AI Search, Event Grid,
 Service Bus, AKS, API Management, Application Insights, Azure OpenAI via
-Foundry, Postgres for session memory) is real Azure service usage, wired
+Foundry) is real Azure service usage, wired
 to actually run.
 
 ## 0. Prerequisites
@@ -102,9 +102,9 @@ call, and the Cosmos writes.
 | AKS | Real cluster running both the agent and the ERP/CRM microservice |
 | API Management | Real Consumption-tier instance (see `apim/`), ready to front the AKS services once VNET/private endpoint wiring is added |
 | Application Insights | Real — live distributed trace across the whole call |
-| Postgres (session memory) | Real — LangGraph checkpointer backed by a real Flexible Server, shared correctly across all AKS replicas |
+| Postgres (session memory) | Not available — this subscription has no Postgres Flexible Server SKUs in eastus. Agent falls back to in-process `MemorySaver` automatically. |
 
 ## Memory tiers — what's real
 - **Episodic** (Cosmos `episodicMemory` container): read at the start of every case, written back on resolution. Persists *across* cases for a customer.
 - **Semantic** (Azure AI Search): retrieved every case, grounds the orchestrator's plan in real contract/SOP content.
-- **Session/short-term** (Postgres via LangGraph checkpointer, `agent/graph.py`): persists *within* one case's `thread_id` (= `case_id`), so a follow-up call on the same case resumes with full prior state instead of starting cold.
+- **Session/short-term**: designed for Postgres via LangGraph checkpointer (`agent/graph.py`), persisting *within* one case's `thread_id` (= `case_id`) so a follow-up call resumes with full prior state. On this subscription, no Postgres SKUs are available in eastus, so the agent runs with LangGraph's in-process `MemorySaver` instead — same code path, just not durable across pod restarts or shared across AKS replicas until Postgres is added back (different subscription or a lifted restriction).

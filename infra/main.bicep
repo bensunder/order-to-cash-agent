@@ -17,10 +17,6 @@ param foundryApiKey string
 @description('Model deployment name to call for chat completions')
 param modelDeploymentName string = 'gpt-5-mini'
 
-@description('Admin password for the session-memory Postgres server')
-@secure()
-param postgresAdminPassword string
-
 var tags = {
   project: 'order-to-cash-agent'
   env: 'demo'
@@ -90,34 +86,14 @@ resource cosmosEpisodic 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/cont
   }
 }
 
-// ---------- Postgres (session/short-term memory: LangGraph checkpointer) ----------
-resource postgres 'Microsoft.DBforPostgreSQL/flexibleServers@2023-12-01-preview' = {
-  name: 'pg-o2c-${nameSuffix}'
-  location: location
-  tags: tags
-  sku: { name: 'Standard_B1ms', tier: 'Burstable' }
-  properties: {
-    version: '16'
-    administratorLogin: 'o2cadmin'
-    administratorLoginPassword: postgresAdminPassword
-    storage: { storageSizeGB: 32 }
-    backup: { backupRetentionDays: 7, geoRedundantBackup: 'Disabled' }
-  }
-}
-
-resource postgresDb 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2023-12-01-preview' = {
-  parent: postgres
-  name: 'agent_checkpoints'
-}
-
-resource postgresFirewallAzure 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2023-12-01-preview' = {
-  parent: postgres
-  name: 'AllowAzureServices'
-  properties: {
-    startIpAddress: '0.0.0.0'
-    endIpAddress: '0.0.0.0'
-  }
-}
+// ---------- Session/short-term memory: no Postgres Flexible Server SKUs
+// are available on this subscription in eastus (confirmed via
+// `az postgres flexible-server list-skus` returning empty). The agent's
+// LangGraph checkpointer (agent/graph.py) already falls back to an
+// in-process MemorySaver when POSTGRES_CONN_STRING is unset, so this is
+// a graceful degradation, not a broken feature — durable/shared session
+// memory across AKS replicas would need Postgres added back once this
+// subscription's restriction is lifted or in a different subscription.
 
 // ---------- Azure AI Search (semantic memory: contracts, SOPs) ----------
 resource search 'Microsoft.Search/searchServices@2024-06-01-preview' = {
@@ -234,4 +210,3 @@ output acrLoginServer string = acr.properties.loginServer
 output aksName string = aks.name
 output apimGatewayUrl string = apim.properties.gatewayUrl
 output appInsightsConnectionString string = appInsights.properties.ConnectionString
-output postgresConnectionString string = 'postgresql://o2cadmin:${postgresAdminPassword}@${postgres.properties.fullyQualifiedDomainName}:5432/agent_checkpoints?sslmode=require'

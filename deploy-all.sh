@@ -2,7 +2,6 @@
 set -euo pipefail
 
 : "${FOUNDRY_API_KEY:?Set FOUNDRY_API_KEY env var first}"
-: "${PG_ADMIN_PASSWORD:?Set PG_ADMIN_PASSWORD env var first}"
 
 RG=rg-o2c-demo
 LOCATION=eastus
@@ -18,8 +17,7 @@ az group create -n "$RG" -l "$LOCATION" -o none
 echo "== 2. Deploy infrastructure (long pole: AKS + APIM, be patient) =="
 az deployment group create \
   -g "$RG" -f infra/main.bicep -p infra/main.parameters.json \
-  -p nameSuffix="$SUFFIX" -p foundryApiKey="$FOUNDRY_API_KEY" \
-  -p postgresAdminPassword="$PG_ADMIN_PASSWORD" -o none
+  -p nameSuffix="$SUFFIX" -p foundryApiKey="$FOUNDRY_API_KEY" -o none
 
 echo "== 3. Capture outputs =="
 o() { az deployment group show -g "$RG" -n main --query "properties.outputs.$1.value" -o tsv; }
@@ -28,7 +26,6 @@ SEARCH_ENDPOINT=$(o searchEndpoint)
 ACR_LOGIN_SERVER=$(o acrLoginServer)
 AKS_NAME=$(o aksName)
 APPINSIGHTS_CONN=$(o appInsightsConnectionString)
-POSTGRES_CONN=$(o postgresConnectionString)
 
 COSMOS_KEY=$(az cosmosdb keys list -g "$RG" -n "cosmos-o2c-$SUFFIX" --query primaryMasterKey -o tsv)
 SEARCH_KEY=$(az search admin-key show -g "$RG" --service-name "srch-o2c-$SUFFIX" --query primaryKey -o tsv)
@@ -158,7 +155,9 @@ stringData:
   FUNCTIONS_BASE_URL: "${FUNCTIONS_BASE_URL}"
   FUNCTIONS_KEY: "${FUNCTIONS_KEY}"
   APPLICATIONINSIGHTS_CONNECTION_STRING: "${APPINSIGHTS_CONN}"
-  POSTGRES_CONN_STRING: "${POSTGRES_CONN}"
+  # No POSTGRES_CONN_STRING: no Postgres Flexible Server SKUs are
+  # available on this subscription in eastus. The agent's checkpointer
+  # falls back to in-process MemorySaver automatically (see graph.py).
 YAML_EOF
 
 cat > /tmp/o2c-service.yaml << 'YAML_EOF'
