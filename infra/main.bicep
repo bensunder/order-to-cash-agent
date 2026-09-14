@@ -194,12 +194,12 @@ resource aks 'Microsoft.ContainerService/managedClusters@2024-09-01' = {
         osType: 'Linux'
       }
     ]
-    addonProfiles: {
-      omsagent: {
-        enabled: true
-        config: { logAnalyticsWorkspaceResourceID: logAnalytics.id }
-      }
-    }
+    // omsagent (Container Insights) add-on removed: it requires the
+    // Microsoft.OperationsManagement provider, which is unregistered on
+    // this subscription by default (same pattern as Compute/Network
+    // earlier) and would mean another registration-and-wait cycle.
+    // Not needed for the live demo — Application Insights already
+    // covers the observability story end to end.
   }
 }
 
