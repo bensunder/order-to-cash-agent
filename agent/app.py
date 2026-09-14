@@ -11,6 +11,7 @@ import uuid
 
 from azure.monitor.opentelemetry import configure_azure_monitor
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from graph import compiled_graph
@@ -21,6 +22,16 @@ if APPINSIGHTS_CONNECTION_STRING:
 
 logging.basicConfig(level=logging.INFO)
 app = FastAPI(title="Order-to-cash exception handling agent")
+
+# Demo-only: allow any origin so a static HTML front end can call this
+# directly from a browser. Scope this to the actual front-end's origin
+# before this goes anywhere near production.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 class CaseRequest(BaseModel):

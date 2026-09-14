@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Order-to-Cash Exception Handling Agent</title>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; max-width: 780px; margin: 40px auto; padding: 0 20px; background: #f7f7f8; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #666; font-size: 13px; margin-bottom: 20px; }
+  #endpoint-row { display: flex; gap: 8px; margin-bottom: 20px; }
+  #endpoint { flex: 1; padding: 8px; font-size: 13px; border: 1px solid #ccc; border-radius: 6px; }
+  #chat { background: white; border: 1px solid #e0e0e0; border-radius: 10px; padding: 16px; min-height: 300px; margin-bottom: 16px; }
+  .msg { margin-bottom: 16px; }
+  .msg .role { font-size: 11px; font-weight: 600; text-transform: uppercase; color: #888; margin-bottom: 4px; }
+  .msg.user .bubble { background: #e8f0fe; padding: 10px 14px; border-radius: 8px; display: inline-block; }
+  .msg.agent .bubble { background: #f0f0f0; padding: 10px 14px; border-radius: 8px; }
+  .outcome { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+  .outcome.resolved { background: #d4edda; color: #155724; }
+  .outcome.escalated { background: #fff3cd; color: #856404; }
+  .detail-block { background: #fafafa; border: 1px solid #eee; border-radius: 6px; padding: 10px; margin-top: 8px; font-size: 12px; }
+  .detail-block h4 { margin: 0 0 6px 0; font-size: 11px; text-transform: uppercase; color: #999; }
+  pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-family: 'SF Mono', Consolas, monospace; font-size: 11px; }
+  #input-row { display: flex; gap: 8px; }
+  #query { flex: 1; padding: 12px; font-size: 14px; border: 1px solid #ccc; border-radius: 8px; }
+  button { padding: 12px 20px; font-size: 14px; border: none; border-radius: 8px; background: #1a73e8; color: white; cursor: pointer; }
+  button:disabled { background: #aaa; cursor: default; }
+  .examples { margin-bottom: 16px; }
+  .examples button { background: white; color: #1a73e8; border: 1px solid #1a73e8; font-size: 12px; padding: 6px 12px; margin-right: 8px; margin-bottom: 8px; }
+  .loading { color: #888; font-style: italic; }
+</style>
+</head>
+<body>
+  <h1>Order-to-Cash Exception Handling Agent</h1>
+  <div class="sub">LangGraph agent on AKS · Azure OpenAI · Azure AI Search · Cosmos DB · Service Bus</div>
+
+  <div id="endpoint-row">
+    <input id="endpoint" type="text" value="http://20.241.138.250/invoke" />
+  </div>
+
+  <div class="examples">
+    <button onclick="fillExample(1)">Cross-ship scenario</button>
+    <button onclick="fillExample(2)">Escalation scenario</button>
+    <button onclick="fillExample(3)">Policy lookup only</button>
+  </div>
+
+  <div id="chat"></div>
+
+  <div id="input-row">
+    <input id="query" type="text" placeholder="Describe the customer's issue..." onkeydown="if(event.key==='Enter') send()" />
+    <button id="send-btn" onclick="send()">Send</button>
+  </div>
+
+<script>
+const examples = {
+  1: "Please check current inventory and cross-ship PART-99X immediately, my shipment is delayed 5 days",
+  2: "My shipment is delayed, do you have PART-99X anywhere?",
+  3: "What's our policy on billing credits for shipments delayed more than 5 days?"
+};
+function fillExample(n) {
+  document.getElementById('query').value = examples[n];
+}
+
+let customerId = "cust-" + Math.floor(Math.random() * 900 + 100);
+
+function addMessage(role, html) {
+  const chat = document.getElementById('chat');
+  const div = document.createElement('div');
+  div.className = 'msg ' + role;
+  div.innerHTML = '<div class="role">' + role + '</div>' + html;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+
+async function send() {
+  const input = document.getElementById('query');
+  const query = input.value.trim();
+  if (!query) return;
+  const endpoint = document.getElementById('endpoint').value.trim();
+  const btn = document.getElementById('send-btn');
+
+  addMessage('user', '<div class="bubble">' + escapeHtml(query) + '</div>');
+  input.value = '';
+  btn.disabled = true;
+  const loadingMsg = addMessage('agent', '<div class="loading">Retrieving policy, calling Azure OpenAI, checking inventory...</div>');
+
+  try {
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ customer_id: customerId, query: query })
+    });
+    const data = await res.json();
+    loadingMsg.remove();
+    renderResult(data);
+  } catch (err) {
+    loadingMsg.remove();
+    addMessage('agent', '<div class="bubble" style="color:#c00">Request failed: ' + escapeHtml(String(err)) + '</div>');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderResult(data) {
+  const outcomeClass = data.outcome === 'resolved' ? 'resolved' : 'escalated';
+  let html = '<span class="outcome ' + outcomeClass + '">' + (data.outcome || 'unknown').toUpperCase() + '</span>';
+  html += '<div class="bubble">' + escapeHtml((data.plan && data.plan.reasoning) || 'No reasoning returned.') + '</div>';
+
+  if (data.plan) {
+    html += '<div class="detail-block"><h4>Plan</h4><pre>' + escapeHtml(JSON.stringify(data.plan, null, 2)) + '</pre></div>';
+  }
+  if (data.tool_results && Object.keys(data.tool_results).length) {
+    html += '<div class="detail-block"><h4>Tool results (ERP/CRM)</h4><pre>' + escapeHtml(JSON.stringify(data.tool_results, null, 2)) + '</pre></div>';
+  }
+  if (data.judge_result) {
+    html += '<div class="detail-block"><h4>Judge / guardrail check</h4><pre>' + escapeHtml(JSON.stringify(data.judge_result, null, 2)) + '</pre></div>';
+  }
+  html += '<div class="detail-block"><h4>Case ID</h4><pre>' + escapeHtml(data.case_id || '') + '</pre></div>';
+
+  addMessage('agent', html);
+}
+
+function escapeHtml(s) {
+  const div = document.createElement('div');
+  div.textContent = s;
+  return div.innerHTML;
+}
+</script>
+</body>
+</html>
